@@ -1,0 +1,257 @@
+pipeline {
+  agent any
+  environment {
+    HOME="."
+    CI = "true"
+    BRANCH = String.valueOf(BRANCH_NAME).toLowerCase().replace("/", "-")
+    PREVIEW_DOMAIN = "aia-preview.wyeworks.com"
+  }
+  options {
+    disableConcurrentBuilds()
+  }
+  stages {
+    script {
+    if(env.BRANCH_NAME == 'develop-ci') {
+    steps {                       
+    stage("Log env variables") {
+      steps {
+        sh "printenv | sort"
+      }
+    }
+
+    stage("Install dependencies") {
+      steps {
+        sh "npm install"
+        sh """
+          cd webapp
+          npm install
+        """
+      }
+    }
+
+    stage("Webapp") {
+      failFast true
+      parallel {
+        stage("Format check") {
+          steps {
+            sh """
+              cd webapp
+              npm run format:check
+            """
+          }
+        }
+
+        stage("Linter") {
+          steps {
+            sh """
+              cd webapp
+              npm run lint
+            """
+          }
+        }
+
+        stage("Unit Tests") {
+          steps {
+            sh """
+              cd webapp
+              npm run test:cov
+            """
+          }
+          post {
+            success {
+              junit "coverage/junit.xml"
+
+              publishHTML([
+                allowMissing: false,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: "coverage",
+                reportFiles: "index.html",
+                reportName: "Unit Test Coverage Report",
+                reportTitles: ""
+              ])
+            }
+          }
+        }
+      }
+    }
+
+    stage("Deploy") {
+      stages {
+        stage("Deploy feature environment") {
+          environment {
+            BRANCH = String.valueOf(CHANGE_BRANCH).toLowerCase().replace("/", "-")
+            AWS_ACCESS_KEY_ID = credentials('ddx-deploy-aws-key-id')
+            AWS_SECRET_ACCESS_KEY = credentials('ddx-deploy-aws-secret-access-key')
+          }
+          when {
+            allOf {
+              expression { env.CHANGE_ID != null }
+              expression { env.CHANGE_TARGET != null }
+            }
+          }
+          steps {
+            script {
+              env.APP_PORT = 10000 + env.CHANGE_ID.toInteger()
+              env.DB_PORT = 30000 + env.CHANGE_ID.toInteger()
+              env.DOMAIN = "http://${env.BRANCH}.${env.PREVIEW_DOMAIN}:${env.APP_PORT}"
+            }
+
+            echo "Building PR #${env.CHANGE_ID}"
+            echo "App will be available on ${env.DOMAIN}"
+
+            // Build image to have the latest changes on the app, this can be improved using some king of change detection based on git
+            // so we can rebuild the app only when needed
+            sh "docker-compose build"
+
+            // Running the app
+            sh "DB_PORT=${env.DB_PORT} APP_PORT=${env.APP_PORT} BRANCH=${env.BRANCH} DOMAIN=${env.DOMAIN} AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} docker-compose up -d"
+          }
+        }
+      }
+    }
+
+    stage("Api Tests"){
+      when {
+        expression { env.DOMAIN != null }
+      }
+      steps {
+          sh """
+              sudo chmod 555 wait-for-app.sh
+              APP_BASE_URL="${env.DOMAIN}" ./wait-for-app.sh
+              APP_BASE_URL="${env.DOMAIN}" DB_NAME=aia-ddx DB_USER=root DB_HOST=localhost DB_PASSWORD=p@ssw0rd DB_PORT="${DB_PORT}" npm run test:api
+              APP_BASE_URL="${env.DOMAIN}" DB_NAME=aia-ddx DB_USER=root DB_HOST=localhost DB_PASSWORD=p@ssw0rd DB_PORT="${DB_PORT}" JWT_SECRET=123 npm test
+          """
+      }
+    }
+
+    stage("E2E Tests") {
+      when {
+        allOf {
+          expression { env.CHANGE_ID != null }
+          expression { env.CHANGE_TARGET != null }
+        }
+      }
+
+      agent {
+              docker { image 'markhobson/node-chrome:latest' }
+            }
+            steps {
+                sh """
+                    node --version
+                    cd webapp/e2e/wdio
+                    google-chrome --version
+                    npm install
+                    rm -rf allure-results
+                    APP_BASE_URL="${env.DOMAIN}" npm run e2e:ci -- --baseUrl=${env.DOMAIN}
+                """
+            }
+    }
+  }
+  }
+  }} script {
+    else if (env.BRANCH_NAME.startsWith('PR')) {
+    
+    steps {    
+            
+    stage("Log env variables") {
+      steps {
+        sh "printenv | sort"
+      }
+    }
+
+    stage("Install dependencies") {
+      steps {
+        sh "npm install"
+        sh """
+          cd webapp
+          npm install
+        """
+      }
+    }
+
+    stage("Webapp") {
+      failFast true
+      parallel {
+        stage("Format check") {
+          steps {
+            sh """
+              cd webapp
+              npm run format:check
+            """
+          }
+        }
+
+        stage("Linter") {
+          steps {
+            sh """
+              cd webapp
+              npm run lint
+            """
+          }
+        }
+
+        stage("Unit Tests") {
+          steps {
+            sh """
+              cd webapp
+              npm run test:cov
+            """
+          }
+          post {
+            success {
+              junit "coverage/junit.xml"
+
+              publishHTML([
+                allowMissing: false,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: "coverage",
+                reportFiles: "index.html",
+                reportName: "Unit Test Coverage Report",
+                reportTitles: ""
+              ])
+            }
+          }
+        }
+      }
+    }
+
+    stage("Deploy") {
+      stages {
+        stage("Deploy feature environment") {
+          environment {
+            BRANCH = String.valueOf(CHANGE_BRANCH).toLowerCase().replace("/", "-")
+            AWS_ACCESS_KEY_ID = credentials('ddx-deploy-aws-key-id')
+            AWS_SECRET_ACCESS_KEY = credentials('ddx-deploy-aws-secret-access-key')
+          }
+          when {
+            allOf {
+              expression { env.CHANGE_ID != null }
+              expression { env.CHANGE_TARGET != null }
+            }
+          }
+          steps {
+            script {
+              env.APP_PORT = 10000 + env.CHANGE_ID.toInteger()
+              env.DB_PORT = 30000 + env.CHANGE_ID.toInteger()
+              env.DOMAIN = "http://${env.BRANCH}.${env.PREVIEW_DOMAIN}:${env.APP_PORT}"
+            }
+
+            echo "Building PR #${env.CHANGE_ID}"
+            echo "App will be available on ${env.DOMAIN}"
+
+            // Build image to have the latest changes on the app, this can be improved using some king of change detection based on git
+            // so we can rebuild the app only when needed
+            sh "docker-compose build"
+
+            // Running the app
+            sh "DB_PORT=${env.DB_PORT} APP_PORT=${env.APP_PORT} BRANCH=${env.BRANCH} DOMAIN=${env.DOMAIN} AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} docker-compose up -d"
+          }
+        }
+      }
+    }
+  }
+  }
+  }
+}
